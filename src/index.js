@@ -236,7 +236,7 @@ app.get('/health', (req, res) => {
 
 /**
  * GET /watch/:raceId
- * SPECTATOR PAGE - Live race viewer
+ * SPECTATOR PAGE - Live race viewer (supports both Pulse WebSocket AND Firestore fallback)
  */
 app.get('/watch/:raceId', (req, res) => {
   const { raceId } = req.params;
@@ -248,6 +248,16 @@ app.get('/watch/:raceId', (req, res) => {
   const wsUrl = `${wsProtocol}://${host}`;
   const httpUrl = `${req.headers['x-forwarded-proto'] || 'http'}://${host}`;
   
+  // Firebase config for direct Firestore access
+  const firebaseConfig = {
+    apiKey: "AIzaSyB1gWjlZLUYQOz-1-6tZ2KBjxLlgTLwFvE",
+    authDomain: "resz-dev.firebaseapp.com",
+    projectId: "resz-dev",
+    storageBucket: "resz-dev.firebasestorage.app",
+    messagingSenderId: "934349498127",
+    appId: "1:934349498127:ios:b34c16ab52ce37c0c4a5c2"
+  };
+  
   res.send(`
     <!DOCTYPE html>
     <html lang="en">
@@ -257,6 +267,9 @@ app.get('/watch/:raceId', (req, res) => {
       <title>🏃 Live Race - SEVN</title>
       <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
       <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+      <!-- Firebase for Firestore fallback -->
+      <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+      <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
       <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         
@@ -532,6 +545,20 @@ app.get('/watch/:raceId', (req, res) => {
         const HTTP_URL = '${httpUrl}';
         const SPECTATOR_ID = 'spectator_' + Math.random().toString(36).substr(2, 9);
         
+        // Firebase config for Firestore fallback
+        const firebaseConfig = ${JSON.stringify(firebaseConfig)};
+        
+        // Initialize Firebase
+        let db = null;
+        let firestoreUnsubscribe = null;
+        try {
+          firebase.initializeApp(firebaseConfig);
+          db = firebase.firestore();
+          console.log('✅ Firebase initialized');
+        } catch (e) {
+          console.warn('⚠️ Firebase init error:', e);
+        }
+        
         // Runner colors (matches iOS app)
         const RUNNER_COLORS = [
           '#FF6347', // Tomato (Orange-Red)
@@ -576,14 +603,58 @@ app.get('/watch/:raceId', (req, res) => {
         }
         
         // ═══════════════════════════════════════════════════════════
-        // WEBSOCKET CONNECTION
+        // FIRESTORE FALLBACK (Primary data source!)
+        // ═══════════════════════════════════════════════════════════
+        
+        function connectFirestore() {
+          if (!db) {
+            console.warn('⚠️ Firestore not available');
+            return;
+          }
+          
+          console.log('🔥 Connecting to Firestore for race:', RACE_ID);
+          updateConnectionStatus('connecting');
+          
+          // Listen to participants subcollection
+          firestoreUnsubscribe = db.collection('liveRaceSessions')
+            .doc(RACE_ID)
+            .collection('participants')
+            .onSnapshot((snapshot) => {
+              console.log('🔥 Firestore update: ' + snapshot.docs.length + ' participants');
+              updateConnectionStatus('connected');
+              
+              snapshot.docs.forEach(doc => {
+                const data = doc.data();
+                const runnerId = data.odisplayName || data.userName || doc.id;
+                
+                // Only show runners with valid positions
+                if (data.latitude && data.longitude && data.latitude !== 0 && data.longitude !== 0) {
+                  updateRunner(doc.id, {
+                    name: data.displayName || data.userName || 'Runner',
+                    lat: data.latitude,
+                    lng: data.longitude,
+                    distance: data.distance || 0,
+                    pace: data.currentPace || 0,
+                    heading: data.heading || 0,
+                    status: data.status,
+                    imageUrl: data.userImageUrl || null
+                  });
+                }
+              });
+            }, (error) => {
+              console.error('❌ Firestore error:', error);
+              updateConnectionStatus('disconnected');
+            });
+        }
+        
+        // ═══════════════════════════════════════════════════════════
+        // WEBSOCKET CONNECTION (Backup if Pulse is running)
         // ═══════════════════════════════════════════════════════════
         
         function connect() {
           const url = WS_URL + '?raceId=' + RACE_ID + '&userId=' + SPECTATOR_ID + '&role=spectator';
           
           console.log('🔌 Connecting to:', url);
-          updateConnectionStatus('connecting');
           
           ws = new WebSocket(url);
           ws.binaryType = 'arraybuffer';
@@ -591,7 +662,6 @@ app.get('/watch/:raceId', (req, res) => {
           ws.onopen = () => {
             console.log('✅ Connected to Pulse server');
             reconnectAttempts = 0;
-            updateConnectionStatus('connected');
             
             // Load initial snapshot
             loadSnapshot();
@@ -602,13 +672,8 @@ app.get('/watch/:raceId', (req, res) => {
           };
           
           ws.onclose = () => {
-            console.log('❌ Disconnected');
-            updateConnectionStatus('disconnected');
-            
-            // Reconnect with exponential backoff
-            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+            console.log('❌ Pulse disconnected, using Firestore');
             reconnectAttempts++;
-            setTimeout(connect, delay);
           };
           
           ws.onerror = (err) => {
@@ -709,8 +774,9 @@ app.get('/watch/:raceId', (req, res) => {
         // ═══════════════════════════════════════════════════════════
         
         function updateRunner(runnerId, data) {
-          const colorIndex = parseInt(runnerId) % RUNNER_COLORS.length;
-          const color = RUNNER_COLORS[colorIndex];
+          const colorIndex = runners.size % RUNNER_COLORS.length;
+          const color = runners.has(runnerId) ? runners.get(runnerId).color : RUNNER_COLORS[colorIndex];
+          const displayName = data.name || 'Runner ' + runnerId.slice(-4);
           
           if (!runners.has(runnerId)) {
             // Create new runner
@@ -722,13 +788,13 @@ app.get('/watch/:raceId', (req, res) => {
               weight: 3
             }).addTo(map);
             
-            // Add label
+            // Add label with actual name
             const label = L.tooltip({
               permanent: true,
               direction: 'top',
               offset: [0, -15],
               className: 'runner-label'
-            }).setContent('Runner ' + runnerId);
+            }).setContent(displayName.split(' ')[0]); // First name only
             
             marker.bindTooltip(label);
             
@@ -742,9 +808,12 @@ app.get('/watch/:raceId', (req, res) => {
             runners.set(runnerId, {
               marker,
               trail,
-              data: data,
-              positions: [[data.lat, data.lng]]
+              data: { ...data, name: displayName },
+              positions: [[data.lat, data.lng]],
+              color: color
             });
+            
+            console.log('🏃 New runner:', displayName, 'at', data.lat.toFixed(5), data.lng.toFixed(5));
             
             // Fit map to show all runners
             fitMapToRunners();
@@ -753,18 +822,40 @@ app.get('/watch/:raceId', (req, res) => {
             // Update existing runner
             const runner = runners.get(runnerId);
             runner.marker.setLatLng([data.lat, data.lng]);
-            runner.data = data;
+            runner.data = { ...data, name: runner.data.name || displayName };
             
-            // Update trail
-            runner.positions.push([data.lat, data.lng]);
-            if (runner.positions.length > 100) {
-              runner.positions.shift(); // Keep last 100 points
+            // Update trail (smooth animation)
+            const lastPos = runner.positions[runner.positions.length - 1];
+            const newPos = [data.lat, data.lng];
+            
+            // Only add to trail if moved significantly (>5 meters)
+            if (!lastPos || getDistance(lastPos, newPos) > 5) {
+              runner.positions.push(newPos);
+              if (runner.positions.length > 500) {
+                runner.positions.shift(); // Keep last 500 points
+              }
+              runner.trail.setLatLngs(runner.positions);
             }
-            runner.trail.setLatLngs(runner.positions);
           }
           
           // Update UI
           updateRunnersPanel();
+        }
+        
+        // Calculate distance between two points in meters
+        function getDistance(pos1, pos2) {
+          const R = 6371000; // Earth radius in meters
+          const lat1 = pos1[0] * Math.PI / 180;
+          const lat2 = pos2[0] * Math.PI / 180;
+          const deltaLat = (pos2[0] - pos1[0]) * Math.PI / 180;
+          const deltaLng = (pos2[1] - pos1[1]) * Math.PI / 180;
+          
+          const a = Math.sin(deltaLat/2) * Math.sin(deltaLat/2) +
+                    Math.cos(lat1) * Math.cos(lat2) *
+                    Math.sin(deltaLng/2) * Math.sin(deltaLng/2);
+          const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+          
+          return R * c;
         }
         
         function fitMapToRunners() {
@@ -801,10 +892,11 @@ app.get('/watch/:raceId', (req, res) => {
           
           container.innerHTML = sorted.map(([runnerId, runner], index) => {
             const data = runner.data;
-            const colorIndex = parseInt(runnerId) % RUNNER_COLORS.length;
-            const color = RUNNER_COLORS[colorIndex];
+            const color = runner.color;
             const distanceMiles = ((data.distance || 0) / 1609.34).toFixed(2);
             const paceStr = formatPace(data.pace || 0);
+            const name = data.name || 'Runner';
+            const initials = name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase();
             
             return \`
               <div class="runner-card" onclick="focusRunner('\${runnerId}')">
@@ -812,10 +904,10 @@ app.get('/watch/:raceId', (req, res) => {
                   \${index + 1}
                 </div>
                 <div class="runner-avatar" style="background: \${color};">
-                  R\${runnerId.slice(-1)}
+                  \${initials}
                 </div>
                 <div class="runner-info">
-                  <div class="runner-name">Runner \${runnerId}</div>
+                  <div class="runner-name">\${name}</div>
                   <div class="runner-stats">
                     <span class="stat">
                       <span class="stat-value">\${distanceMiles}</span> mi
@@ -868,6 +960,11 @@ app.get('/watch/:raceId', (req, res) => {
         
         document.addEventListener('DOMContentLoaded', () => {
           initMap();
+          
+          // Primary: Connect to Firestore (always works!)
+          connectFirestore();
+          
+          // Secondary: Also try WebSocket for lower latency
           connect();
           
           // Refresh runners panel periodically
