@@ -235,6 +235,651 @@ app.get('/health', (req, res) => {
 });
 
 /**
+ * GET /watch/:raceId
+ * SPECTATOR PAGE - Live race viewer
+ */
+app.get('/watch/:raceId', (req, res) => {
+  const { raceId } = req.params;
+  const race = races.get(raceId);
+  
+  // Get server URL for WebSocket connection
+  const wsProtocol = req.headers['x-forwarded-proto'] === 'https' ? 'wss' : 'ws';
+  const host = req.headers.host || 'localhost:3000';
+  const wsUrl = `${wsProtocol}://${host}`;
+  const httpUrl = `${req.headers['x-forwarded-proto'] || 'http'}://${host}`;
+  
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>🏃 Live Race - SEVN</title>
+      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+      <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+      <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+          font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif;
+          background: #0a0a0a;
+          color: #ffffff;
+          min-height: 100vh;
+          overflow-x: hidden;
+        }
+        
+        .header {
+          background: linear-gradient(180deg, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0) 100%);
+          padding: 20px;
+          position: fixed;
+          top: 0;
+          left: 0;
+          right: 0;
+          z-index: 1000;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+        }
+        
+        .logo {
+          font-size: 24px;
+          font-weight: 700;
+          color: #CCFF00;
+        }
+        
+        .live-badge {
+          background: #ff3b30;
+          color: white;
+          padding: 6px 12px;
+          border-radius: 20px;
+          font-size: 12px;
+          font-weight: 600;
+          animation: pulse 2s infinite;
+          display: flex;
+          align-items: center;
+          gap: 6px;
+        }
+        
+        .live-badge::before {
+          content: '';
+          width: 8px;
+          height: 8px;
+          background: white;
+          border-radius: 50%;
+        }
+        
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.7; }
+        }
+        
+        #map {
+          width: 100%;
+          height: 60vh;
+          background: #1a1a1a;
+        }
+        
+        .runners-panel {
+          padding: 20px;
+          background: #0a0a0a;
+        }
+        
+        .panel-title {
+          font-size: 14px;
+          color: #888;
+          text-transform: uppercase;
+          letter-spacing: 1px;
+          margin-bottom: 16px;
+        }
+        
+        .runners-list {
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+        }
+        
+        .runner-card {
+          background: #1a1a1a;
+          border-radius: 16px;
+          padding: 16px;
+          display: flex;
+          align-items: center;
+          gap: 16px;
+          border: 1px solid #2a2a2a;
+          transition: all 0.3s ease;
+        }
+        
+        .runner-card:hover {
+          border-color: #CCFF00;
+          transform: translateY(-2px);
+        }
+        
+        .runner-position {
+          width: 32px;
+          height: 32px;
+          border-radius: 50%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-weight: 700;
+          font-size: 14px;
+        }
+        
+        .runner-avatar {
+          width: 48px;
+          height: 48px;
+          border-radius: 50%;
+          background: linear-gradient(135deg, #CCFF00, #00ff88);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-weight: 700;
+          font-size: 18px;
+          color: #000;
+        }
+        
+        .runner-info {
+          flex: 1;
+        }
+        
+        .runner-name {
+          font-weight: 600;
+          font-size: 16px;
+          margin-bottom: 4px;
+        }
+        
+        .runner-stats {
+          display: flex;
+          gap: 16px;
+          color: #888;
+          font-size: 14px;
+        }
+        
+        .stat {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+        }
+        
+        .stat-value {
+          color: #fff;
+          font-weight: 500;
+        }
+        
+        .runner-pace {
+          text-align: right;
+        }
+        
+        .pace-value {
+          font-size: 24px;
+          font-weight: 700;
+          color: #CCFF00;
+        }
+        
+        .pace-label {
+          font-size: 12px;
+          color: #666;
+        }
+        
+        .connection-status {
+          position: fixed;
+          bottom: 20px;
+          right: 20px;
+          padding: 10px 16px;
+          border-radius: 20px;
+          font-size: 12px;
+          font-weight: 500;
+          z-index: 1000;
+        }
+        
+        .connected {
+          background: rgba(0, 255, 136, 0.2);
+          color: #00ff88;
+          border: 1px solid rgba(0, 255, 136, 0.3);
+        }
+        
+        .disconnected {
+          background: rgba(255, 59, 48, 0.2);
+          color: #ff3b30;
+          border: 1px solid rgba(255, 59, 48, 0.3);
+        }
+        
+        .connecting {
+          background: rgba(255, 204, 0, 0.2);
+          color: #ffcc00;
+          border: 1px solid rgba(255, 204, 0, 0.3);
+        }
+        
+        .no-runners {
+          text-align: center;
+          padding: 40px 20px;
+          color: #666;
+        }
+        
+        .no-runners h3 {
+          font-size: 18px;
+          margin-bottom: 8px;
+          color: #888;
+        }
+        
+        .timer {
+          font-size: 32px;
+          font-weight: 700;
+          font-family: "SF Mono", Monaco, monospace;
+          color: #CCFF00;
+        }
+        
+        /* Leaflet customization */
+        .leaflet-container {
+          background: #1a1a1a;
+        }
+        
+        .runner-marker {
+          border-radius: 50%;
+          border: 3px solid white;
+          box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+        }
+        
+        .runner-label {
+          background: rgba(0,0,0,0.8);
+          border: none;
+          border-radius: 4px;
+          color: white;
+          font-weight: 600;
+          padding: 2px 6px;
+          font-size: 11px;
+          white-space: nowrap;
+        }
+        
+        @media (max-width: 768px) {
+          .header { padding: 12px 16px; }
+          .logo { font-size: 20px; }
+          #map { height: 50vh; }
+          .runners-panel { padding: 16px; }
+          .runner-card { padding: 12px; }
+        }
+      </style>
+    </head>
+    <body>
+      <header class="header">
+        <div class="logo">🏁 SEVN</div>
+        <div class="live-badge">LIVE</div>
+      </header>
+      
+      <div id="map"></div>
+      
+      <div class="runners-panel">
+        <div class="panel-title">Runners</div>
+        <div id="runners-list" class="runners-list">
+          <div class="no-runners">
+            <h3>Waiting for runners...</h3>
+            <p>Runners will appear here when they start</p>
+          </div>
+        </div>
+      </div>
+      
+      <div id="connection-status" class="connection-status connecting">
+        Connecting...
+      </div>
+      
+      <script>
+        // ═══════════════════════════════════════════════════════════
+        // CONFIGURATION
+        // ═══════════════════════════════════════════════════════════
+        
+        const RACE_ID = '${raceId}';
+        const WS_URL = '${wsUrl}';
+        const HTTP_URL = '${httpUrl}';
+        const SPECTATOR_ID = 'spectator_' + Math.random().toString(36).substr(2, 9);
+        
+        // Runner colors (matches iOS app)
+        const RUNNER_COLORS = [
+          '#FF6347', // Tomato (Orange-Red)
+          '#4169E1', // Royal Blue
+          '#32CD32', // Lime Green
+          '#FFD700', // Gold
+          '#FF69B4', // Hot Pink
+          '#00CED1', // Dark Turquoise
+          '#9370DB', // Medium Purple
+          '#FF8C00'  // Dark Orange
+        ];
+        
+        // ═══════════════════════════════════════════════════════════
+        // STATE
+        // ═══════════════════════════════════════════════════════════
+        
+        let ws = null;
+        let map = null;
+        let runners = new Map(); // runnerId → { marker, data, trail }
+        let reconnectAttempts = 0;
+        
+        // ═══════════════════════════════════════════════════════════
+        // MAP INITIALIZATION
+        // ═══════════════════════════════════════════════════════════
+        
+        function initMap() {
+          // Default to Miami Half Marathon start area
+          map = L.map('map', {
+            center: [25.782187, -80.189261],
+            zoom: 15,
+            zoomControl: false,
+            attributionControl: false
+          });
+          
+          // Dark map tiles
+          L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+            maxZoom: 19
+          }).addTo(map);
+          
+          // Add zoom control to bottom left
+          L.control.zoom({ position: 'bottomleft' }).addTo(map);
+        }
+        
+        // ═══════════════════════════════════════════════════════════
+        // WEBSOCKET CONNECTION
+        // ═══════════════════════════════════════════════════════════
+        
+        function connect() {
+          const url = WS_URL + '?raceId=' + RACE_ID + '&userId=' + SPECTATOR_ID + '&role=spectator';
+          
+          console.log('🔌 Connecting to:', url);
+          updateConnectionStatus('connecting');
+          
+          ws = new WebSocket(url);
+          ws.binaryType = 'arraybuffer';
+          
+          ws.onopen = () => {
+            console.log('✅ Connected to Pulse server');
+            reconnectAttempts = 0;
+            updateConnectionStatus('connected');
+            
+            // Load initial snapshot
+            loadSnapshot();
+          };
+          
+          ws.onmessage = (event) => {
+            handleMessage(event.data);
+          };
+          
+          ws.onclose = () => {
+            console.log('❌ Disconnected');
+            updateConnectionStatus('disconnected');
+            
+            // Reconnect with exponential backoff
+            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+            reconnectAttempts++;
+            setTimeout(connect, delay);
+          };
+          
+          ws.onerror = (err) => {
+            console.error('❌ WebSocket error:', err);
+          };
+        }
+        
+        // ═══════════════════════════════════════════════════════════
+        // SNAPSHOT LOADING
+        // ═══════════════════════════════════════════════════════════
+        
+        async function loadSnapshot() {
+          try {
+            const response = await fetch(HTTP_URL + '/race/' + RACE_ID + '/snapshot');
+            
+            if (!response.ok) {
+              console.warn('⚠️ Snapshot not available');
+              return;
+            }
+            
+            const buffer = await response.arrayBuffer();
+            const data = new Uint8Array(buffer);
+            
+            // Parse snapshot (simple binary format)
+            // Format: [type:1][serverTime:8][runnerCount:2][runners...]
+            if (data.length < 13) {
+              console.log('📦 Empty snapshot');
+              return;
+            }
+            
+            const view = new DataView(buffer);
+            const runnerCount = view.getUint16(9, true);
+            
+            console.log('📦 Loaded snapshot:', runnerCount, 'runners');
+            
+            // Parse each runner (simplified - real parsing depends on protocol)
+            let offset = 11;
+            for (let i = 0; i < runnerCount && offset < data.length; i++) {
+              // This is a simplified parser - actual format may differ
+              // For now, we'll rely on WebSocket updates
+            }
+            
+          } catch (err) {
+            console.error('❌ Snapshot error:', err);
+          }
+        }
+        
+        // ═══════════════════════════════════════════════════════════
+        // MESSAGE HANDLING
+        // ═══════════════════════════════════════════════════════════
+        
+        function handleMessage(data) {
+          const buffer = new Uint8Array(data);
+          const messageType = buffer[0];
+          
+          // Message type 2 = POSITION_DELTA
+          if (messageType === 2) {
+            handlePositionDelta(buffer);
+          }
+          // Message type 4 = LEADERBOARD
+          else if (messageType === 4) {
+            handleLeaderboard(buffer);
+          }
+        }
+        
+        function handlePositionDelta(buffer) {
+          const view = new DataView(buffer.buffer);
+          
+          // Parse position delta (based on protocol)
+          // Format: [type:1][runnerId:4][lat:4][lng:4][distance:4][pace:2][heading:2][seq:2][timestamp:4]
+          if (buffer.length < 23) return;
+          
+          const runnerId = view.getUint32(1, true);
+          const lat = view.getFloat32(5, true);
+          const lng = view.getFloat32(9, true);
+          const distance = view.getFloat32(13, true);
+          const pace = view.getUint16(17, true) / 100; // pace in min/mi × 100
+          const heading = view.getInt16(19, true);
+          
+          console.log('📍 Position update:', { runnerId, lat, lng, distance, pace });
+          
+          updateRunner(runnerId.toString(), {
+            lat,
+            lng,
+            distance,
+            pace,
+            heading
+          });
+        }
+        
+        function handleLeaderboard(buffer) {
+          // Leaderboard updates (future)
+          console.log('🏆 Leaderboard update received');
+        }
+        
+        // ═══════════════════════════════════════════════════════════
+        // RUNNER MANAGEMENT
+        // ═══════════════════════════════════════════════════════════
+        
+        function updateRunner(runnerId, data) {
+          const colorIndex = parseInt(runnerId) % RUNNER_COLORS.length;
+          const color = RUNNER_COLORS[colorIndex];
+          
+          if (!runners.has(runnerId)) {
+            // Create new runner
+            const marker = L.circleMarker([data.lat, data.lng], {
+              radius: 12,
+              fillColor: color,
+              fillOpacity: 1,
+              color: '#fff',
+              weight: 3
+            }).addTo(map);
+            
+            // Add label
+            const label = L.tooltip({
+              permanent: true,
+              direction: 'top',
+              offset: [0, -15],
+              className: 'runner-label'
+            }).setContent('Runner ' + runnerId);
+            
+            marker.bindTooltip(label);
+            
+            // Trail polyline
+            const trail = L.polyline([], {
+              color: color,
+              weight: 4,
+              opacity: 0.6
+            }).addTo(map);
+            
+            runners.set(runnerId, {
+              marker,
+              trail,
+              data: data,
+              positions: [[data.lat, data.lng]]
+            });
+            
+            // Fit map to show all runners
+            fitMapToRunners();
+            
+          } else {
+            // Update existing runner
+            const runner = runners.get(runnerId);
+            runner.marker.setLatLng([data.lat, data.lng]);
+            runner.data = data;
+            
+            // Update trail
+            runner.positions.push([data.lat, data.lng]);
+            if (runner.positions.length > 100) {
+              runner.positions.shift(); // Keep last 100 points
+            }
+            runner.trail.setLatLngs(runner.positions);
+          }
+          
+          // Update UI
+          updateRunnersPanel();
+        }
+        
+        function fitMapToRunners() {
+          if (runners.size === 0) return;
+          
+          const bounds = L.latLngBounds([]);
+          runners.forEach(runner => {
+            bounds.extend([runner.data.lat, runner.data.lng]);
+          });
+          
+          map.fitBounds(bounds, { padding: [50, 50], maxZoom: 16 });
+        }
+        
+        // ═══════════════════════════════════════════════════════════
+        // UI UPDATES
+        // ═══════════════════════════════════════════════════════════
+        
+        function updateRunnersPanel() {
+          const container = document.getElementById('runners-list');
+          
+          if (runners.size === 0) {
+            container.innerHTML = \`
+              <div class="no-runners">
+                <h3>Waiting for runners...</h3>
+                <p>Runners will appear here when they start</p>
+              </div>
+            \`;
+            return;
+          }
+          
+          // Sort by distance (descending)
+          const sorted = Array.from(runners.entries())
+            .sort((a, b) => (b[1].data.distance || 0) - (a[1].data.distance || 0));
+          
+          container.innerHTML = sorted.map(([runnerId, runner], index) => {
+            const data = runner.data;
+            const colorIndex = parseInt(runnerId) % RUNNER_COLORS.length;
+            const color = RUNNER_COLORS[colorIndex];
+            const distanceMiles = ((data.distance || 0) / 1609.34).toFixed(2);
+            const paceStr = formatPace(data.pace || 0);
+            
+            return \`
+              <div class="runner-card" onclick="focusRunner('\${runnerId}')">
+                <div class="runner-position" style="background: \${color}; color: #000;">
+                  \${index + 1}
+                </div>
+                <div class="runner-avatar" style="background: \${color};">
+                  R\${runnerId.slice(-1)}
+                </div>
+                <div class="runner-info">
+                  <div class="runner-name">Runner \${runnerId}</div>
+                  <div class="runner-stats">
+                    <span class="stat">
+                      <span class="stat-value">\${distanceMiles}</span> mi
+                    </span>
+                  </div>
+                </div>
+                <div class="runner-pace">
+                  <div class="pace-value">\${paceStr}</div>
+                  <div class="pace-label">min/mi</div>
+                </div>
+              </div>
+            \`;
+          }).join('');
+        }
+        
+        function formatPace(pace) {
+          if (!pace || pace <= 0) return '--:--';
+          const minutes = Math.floor(pace);
+          const seconds = Math.round((pace - minutes) * 60);
+          return minutes + ':' + seconds.toString().padStart(2, '0');
+        }
+        
+        function focusRunner(runnerId) {
+          const runner = runners.get(runnerId);
+          if (runner) {
+            map.setView([runner.data.lat, runner.data.lng], 17);
+          }
+        }
+        
+        function updateConnectionStatus(status) {
+          const el = document.getElementById('connection-status');
+          el.className = 'connection-status ' + status;
+          
+          switch (status) {
+            case 'connected':
+              el.textContent = '● Connected';
+              break;
+            case 'disconnected':
+              el.textContent = '○ Reconnecting...';
+              break;
+            case 'connecting':
+              el.textContent = '◐ Connecting...';
+              break;
+          }
+        }
+        
+        // ═══════════════════════════════════════════════════════════
+        // INITIALIZATION
+        // ═══════════════════════════════════════════════════════════
+        
+        document.addEventListener('DOMContentLoaded', () => {
+          initMap();
+          connect();
+          
+          // Refresh runners panel periodically
+          setInterval(updateRunnersPanel, 1000);
+        });
+      </script>
+    </body>
+    </html>
+  `);
+});
+
+/**
  * GET /
  * Welcome page
  */
@@ -301,7 +946,8 @@ app.get('/', (req, res) => {
           ${activeRaces.map(race => `
             <div class="endpoint">
               <strong>Race ID:</strong> ${race.raceId}<br>
-              <strong>Runners:</strong> ${race.runners} | <strong>Clients:</strong> ${race.clients}
+              <strong>Runners:</strong> ${race.runners} | <strong>Clients:</strong> ${race.clients}<br>
+              <a href="/watch/${race.raceId}" style="color: #00ff88; font-weight: bold;">📺 Watch Live →</a>
             </div>
           `).join('')}
         </div>
