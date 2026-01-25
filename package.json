@@ -1,0 +1,24 @@
+{
+  "name": "pulse-server",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "test": "node test-simulator.js 10",
+    "test:100": "node test-simulator.js 100",
+    "test:250": "node test-simulator.js 250"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "ioredis": "^5.9.2",
+    "ws": "^8.19.0"
+  }
+}
