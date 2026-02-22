@@ -616,7 +616,7 @@ app.get('/watch/:raceId', (req, res) => {
           updateConnectionStatus('connecting');
           
           // Listen to participants subcollection
-          firestoreUnsubscribe = db.collection('liveRaceSessions')
+          firestoreUnsubscribe = db.collection('liveRaces')
             .doc(RACE_ID)
             .collection('participants')
             .onSnapshot((snapshot) => {
@@ -625,19 +625,19 @@ app.get('/watch/:raceId', (req, res) => {
               
               snapshot.docs.forEach(doc => {
                 const data = doc.data();
-                const runnerId = data.odisplayName || data.userName || doc.id;
                 
-                // Only show runners with valid positions
+                // Only show runners with valid positions (not 0,0)
                 if (data.latitude && data.longitude && data.latitude !== 0 && data.longitude !== 0) {
                   updateRunner(doc.id, {
-                    name: data.displayName || data.userName || 'Runner',
+                    name: data.userName || 'Runner',
                     lat: data.latitude,
                     lng: data.longitude,
                     distance: data.distance || 0,
                     pace: data.currentPace || 0,
                     heading: data.heading || 0,
                     status: data.status,
-                    imageUrl: data.userImageUrl || null
+                    imageUrl: data.userImageUrl || null,
+                    role: data.role
                   });
                 }
               });
